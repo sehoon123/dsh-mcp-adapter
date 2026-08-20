@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 [![Node](https://img.shields.io/badge/Node-%E2%89%A520-green?style=for-the-badge)](https://nodejs.org)
-[![Tests](https://img.shields.io/badge/tests-80%20passing-brightgreen?style=for-the-badge)](#testing)
+[![Tests](https://img.shields.io/badge/tests-108%20passing-brightgreen?style=for-the-badge)](#testing)
 
 The stock DSH rule is *one plugin = one MCP server*, and every one of that
 server's tools is registered directly — so its full JSON schema sits in your
@@ -127,6 +127,11 @@ mcp({ action: "call", server: "chrome", tool: "take_screenshot", args: { … } }
 model can explore the whole toolset without connecting to anything. Only `call`
 (and a `describe` for a not-yet-cached server) actually connects.
 
+On a fresh install that cache is empty, so the FIRST search transparently warms
+any server it has never catalogued (time-boxed per server, failures ignored) and
+then answers. A server that could not be reached is named in the result instead of
+being silently missing.
+
 ### Hybrid mode: promote the tools you use constantly
 
 Searching first adds a round-trip. For the handful of tools you call all the
@@ -204,11 +209,33 @@ existing files:
 ~/.config/mcp/mcp.json
 ~/.agents/mcp.json
 ~/.agents/mcp/mcp.json
+~/.pi/agent/mcp.json        (compatibility source)
 $DSH_HOME/mcp.json          (default ~/.dsh/mcp.json)
-~/.pi/agent/mcp.json
 <cwd>/.mcp.json
 <cwd>/.dsh/mcp.json
 ```
+
+A borrowed Pi config ranks BELOW this harness's own file: it is a compatibility
+source, not an authority. (With the order reversed, a server present in both lost
+its DSH-only fields — `directTools: true` on a Burp entry was silently dropped.)
+
+### Operator visibility: `/mcp`
+
+The proxy hides tool schemas from the model, which would also hide them from you.
+`/mcp` shows what is actually happening:
+
+```
+### 🔌 MCP Adapter status
+
+- **burp-suite** [http] — ⚫ idle (connects on first use)
+  • tools: 0
+  • promoted as direct tools: all
+- **chrome** [stdio] — 🟢 connected
+  • tools: 29 (29 cached for offline search)
+  • promoted as direct tools: take_screenshot, click, navigate, evaluate_script, list_pages
+```
+
+`/mcp refresh` re-reads every server's tool catalog.
 
 ### Per-server options
 
@@ -258,7 +285,7 @@ node test/http.test.mjs    # HTTP/SSE transport vs a real node:http server
 node test/suite.test.mjs   # config, cache, search, guard, manager (fault injection)
 ```
 
-**80 tests passing.** The suites spawn real MCP servers (a faithful mock that can
+**108 tests passing.** The suites spawn real MCP servers (a faithful mock that can
 be told to crash, hang, flood its stdout, ignore SIGTERM, stall a response body,
 or frame SSE with CRLF) and assert the reliability invariants: requests always
 settle, a crash rejects instead of hanging, the circuit breaker opens, a stale

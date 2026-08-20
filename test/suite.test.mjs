@@ -77,7 +77,13 @@ section('config: corrupt files are skipped, not fatal');
   check('good file still loaded', Boolean(servers.srv));
   rmSync(dir, { recursive: true, force: true });
 }
-check('search paths ordered', configSearchPaths({ home: '/h', cwd: '/c', dshHome: '/d' }).at(-1) === '/c/.dsh/mcp.json');
+{
+  const paths = configSearchPaths({ home: '/h', cwd: '/c', dshHome: '/d' });
+  check('project DSH config has highest precedence', paths.at(-1) === '/c/.dsh/mcp.json');
+  // A borrowed Pi config must NOT override this harness's own file, or a server
+  // present in both loses its DSH-only fields (e.g. directTools).
+  check('DSH config outranks a borrowed pi config', paths.indexOf('/d/mcp.json') > paths.indexOf('/h/.pi/agent/mcp.json'));
+}
 
 // ═══════════════════════════════════════════════════════ CACHE ════════════
 
@@ -429,6 +435,38 @@ section('regression: cache retains bounded input schemas');
   check('small schema is cached', tools.find((t) => t.name === 'small')?.inputSchema !== undefined);
   check('oversized schema omitted (falls back to passthrough)', tools.find((t) => t.name === 'huge')?.inputSchema === undefined);
   rmSync(dir, { recursive: true, force: true });
+}
+
+section('regression: cold cache still finds tools (first-search warm-up)');
+{
+  // On a fresh install the offline cache is empty. Before the warm-up, the very
+  // first search reported "no tools matched" even though servers expose plenty.
+  const { registerProxyTools } = await import('../lib/tools/proxy.js');
+  const dir = mkdtempSync(join(tmpdir(), 'mcp-cold-'));
+  const cache = new MetadataCache({ path: join(dir, 'c.json'), warn: () => {} });
+  const manager = new ServerManager({
+    servers: {
+      good: stdioDef('good', { MOCK_TOOL_COUNT: '5' }),
+      dead: { name: 'dead', transport: 'stdio', command: '/no/such/bin-xyz', args: [], disabled: false, directTools: false },
+    },
+    warn: () => {},
+    onCatalog: (server, tools) => cache.update(server, tools),
+  });
+  const registered = new Map();
+  const ctx = { tools: { register: (d) => registered.set(d.name, d) }, systemPrompt: { section: () => {} }, get: () => undefined };
+  try {
+    registerProxyTools(ctx, { manager, cache, config: { maxOutputBytes: 51_200, maxOutputLines: 2_000, toolTimeoutMs: 120_000 }, warn: () => {} }, (d) => d);
+    check('cache starts empty', cache.servers.length === 0);
+    const first = await registered.get('mcp').execute({ action: 'search', query: 'screenshot' }, {});
+    check('first search finds tools despite a cold cache', /Found \d+ MCP tool/.test(first.text), first.text.slice(0, 60));
+    check('unreachable server is reported honestly', /could not be reached/.test(first.text));
+    check('warm-up populated the cache', cache.getTools('good').length === 5);
+    const second = await registered.get('mcp').execute({ action: 'search', query: 'screenshot' }, {});
+    check('second search still works from cache', /Found \d+ MCP tool/.test(second.text));
+  } finally {
+    await manager.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 console.log(`\n${'═'.repeat(56)}`);

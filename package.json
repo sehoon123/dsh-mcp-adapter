@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-mcp-adapter",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Context-cheap, crash-resistant MCP access for the DeepSeek Harness: one lazy proxy tool instead of dumping every server's schema into context. Zero dependencies.",
   "keywords": [
     "deepseek-harness",
