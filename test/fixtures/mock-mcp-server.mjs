@@ -1,0 +1,142 @@
+#!/usr/bin/env node
+/**
+ * A minimal but faithful stdio MCP server for tests.
+ *
+ * It speaks the real wire protocol — newline-delimited JSON-RPC 2.0 over
+ * stdin/stdout — so the adapter's stdio transport is exercised against genuine
+ * framing, not a mock of itself. Behaviour is controlled by env vars so a single
+ * file can stand in for a healthy server, a slow one, a crasher, and a flapper:
+ *
+ *   MOCK_TOOL_COUNT      how many tools to advertise (default 5)
+ *   MOCK_CRASH_ON_CALL   tool name that makes the process exit(1) mid-call
+ *   MOCK_HANG_ON_CALL    tool name that never responds (tests client timeout)
+ *   MOCK_SLOW_INIT_MS    delay before answering initialize
+ *   MOCK_HUGE_OUTPUT     tool name that returns a multi-MB text block
+ *   MOCK_BAD_FRAME       emit one malformed line before the real reply
+ *   MOCK_EXIT_AFTER_MS   exit(0) unprompted after N ms (tests reconnect)
+ */
+
+import process from 'node:process';
+
+const TOOL_COUNT = Number(process.env.MOCK_TOOL_COUNT ?? 5);
+const CRASH_ON_CALL = process.env.MOCK_CRASH_ON_CALL;
+const HANG_ON_CALL = process.env.MOCK_HANG_ON_CALL;
+const SLOW_INIT_MS = Number(process.env.MOCK_SLOW_INIT_MS ?? 0);
+const HUGE_OUTPUT = process.env.MOCK_HUGE_OUTPUT;
+const BAD_FRAME = process.env.MOCK_BAD_FRAME;
+const EXIT_AFTER_MS = Number(process.env.MOCK_EXIT_AFTER_MS ?? 0);
+
+if (EXIT_AFTER_MS > 0) setTimeout(() => process.exit(0), EXIT_AFTER_MS).unref();
+
+/** Build the advertised tool list. */
+function buildTools() {
+  const names = [
+    ['search_web', 'Search the public web for a query and return ranked results.'],
+    ['take_screenshot', 'Capture a screenshot of the current browser page as a PNG image.'],
+    ['run_sql', 'Execute a read-only SQL query against the connected database.'],
+    ['list_incidents', 'List active security incidents from the detection platform.'],
+    ['quarantine_host', 'Isolate a compromised host from the network immediately.'],
+  ];
+  const tools = [];
+  for (let i = 0; i < TOOL_COUNT; i += 1) {
+    const [name, description] = names[i % names.length];
+    const suffix = i < names.length ? '' : `_${i}`;
+    tools.push({
+      name: `${name}${suffix}`,
+      description,
+      inputSchema: {
+        type: 'object',
+        properties: { query: { type: 'string', description: 'The input value.' } },
+        required: i % 2 === 0 ? ['query'] : [],
+      },
+    });
+  }
+  return tools;
+}
+
+/** Write one JSON-RPC message as a single newline-terminated line. */
+function send(message) {
+  process.stdout.write(`${JSON.stringify(message)}\n`);
+}
+
+let buffer = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  let index = buffer.indexOf('\n');
+  while (index !== -1) {
+    const line = buffer.slice(0, index).trim();
+    buffer = buffer.slice(index + 1);
+    if (line) handleLine(line);
+    index = buffer.indexOf('\n');
+  }
+});
+
+/** Dispatch one received JSON-RPC line. */
+function handleLine(line) {
+  let msg;
+  try {
+    msg = JSON.parse(line);
+  } catch {
+    return; // ignore junk from the client, as a real server would
+  }
+  const { id, method, params } = msg;
+
+  if (method === 'initialize') {
+    const reply = () =>
+      send({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          protocolVersion: '2025-06-18',
+          capabilities: { tools: { listChanged: true } },
+          serverInfo: { name: 'mock-mcp-server', version: '1.0.0' },
+        },
+      });
+    if (SLOW_INIT_MS > 0) setTimeout(reply, SLOW_INIT_MS);
+    else reply();
+    return;
+  }
+
+  if (method === 'notifications/initialized') return;
+
+  if (method === 'tools/list') {
+    if (BAD_FRAME) process.stdout.write('this is not json\n');
+    send({ jsonrpc: '2.0', id, result: { tools: buildTools() } });
+    return;
+  }
+
+  if (method === 'tools/call') {
+    const toolName = params?.name;
+    if (CRASH_ON_CALL && toolName === CRASH_ON_CALL) {
+      process.exit(1); // simulate a server that dies mid-request
+    }
+    if (HANG_ON_CALL && toolName === HANG_ON_CALL) {
+      return; // never reply: the client's timeout must fire
+    }
+    if (HUGE_OUTPUT && toolName === HUGE_OUTPUT) {
+      const big = 'X'.repeat(3 * 1024 * 1024);
+      send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: big }] } });
+      return;
+    }
+    send({
+      jsonrpc: '2.0',
+      id,
+      result: { content: [{ type: 'text', text: `ok: ${toolName}(${JSON.stringify(params?.arguments ?? {})})` }] },
+    });
+    return;
+  }
+
+  if (method === 'ping') {
+    send({ jsonrpc: '2.0', id, result: {} });
+    return;
+  }
+
+  // Unknown method: reply with a JSON-RPC error, never crash.
+  if (id !== undefined) {
+    send({ jsonrpc: '2.0', id, error: { code: -32601, message: `method not found: ${method}` } });
+  }
+}
+
+process.on('SIGTERM', () => process.exit(0));
+process.on('SIGINT', () => process.exit(0));
