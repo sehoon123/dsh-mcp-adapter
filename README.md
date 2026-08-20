@@ -60,8 +60,55 @@ Point it at your servers with a standard `mcp.json` (the same file Claude
 Desktop, Cursor, and pi use — see [Configuration](#configuration)), then restart
 `dsh`. No API keys, no daemon, no Docker.
 
-> If you already run MCP servers as individual `@deepseek-ai/dsh-mcp-client`
-> rows, remove those rows — this adapter replaces them.
+---
+
+## Do I need to disable DSH's default MCP?
+
+**No — there is nothing global to disable.** DSH ships with **no MCP server
+enabled by default**; each server is an explicit `@deepseek-ai/dsh-mcp-client`
+row you added yourself. So there is no "default MCP" toggle to turn off.
+
+**This adapter and the stock `dsh-mcp-client` do not collide.** They register
+tools in different name-spaces, so having both mounted breaks nothing:
+
+| | Tool names it registers |
+|---|---|
+| stock `dsh-mcp-client` | `mcp__<server>__<tool>` (double underscore) |
+| this adapter | `mcp` (proxy) and `mcp_<server>_<tool>` (single underscore, for `directTools`) |
+
+The one thing you should **not** do is route the **same server through both** —
+that gives you the full schema dump *and* the proxy for that server, wasting the
+context you were trying to save. Pick one path per server. Two clean setups:
+
+**A — everything through the adapter (recommended; lowest context).** Delete your
+`dsh-mcp-client` rows and list every server in `mcp.json`. Promote the servers
+you use constantly with `directTools` so they keep zero-latency calls:
+
+```yaml
+# cordis.patch.yml — remove any `- id: mcp-<server>` (dsh-mcp-client) rows, keep only:
+- insert:
+    - id: mcp-adapter
+      name: '@deepseek-ai/dsh-mcp-adapter'
+```
+```jsonc
+// ~/.dsh/mcp.json
+{
+  "mcpServers": {
+    "burp-suite": { "type": "http", "url": "http://localhost:9876/mcp",
+      "headers": { "Authorization": "Bearer <token>" }, "directTools": true },
+    "chrome":     { "command": "npx", "args": ["-y", "chrome-devtools-mcp"],
+      "directTools": ["take_screenshot", "click", "navigate"] },
+    "falcon":     { "command": "npx", "args": ["-y", "@crowdstrike/falcon-mcp"] }
+  }
+}
+```
+
+**B — keep a couple of servers stock, adapter for the rest.** Also fine, because
+the name-spaces do not clash. For example keep Burp as a direct `dsh-mcp-client`
+row and put only the big/occasional servers (Falcon, etc.) behind the adapter.
+Just don't list the same server in both places.
+
+> TL;DR: nothing to disable; both can coexist; just don't double-route one server.
 
 ---
 
