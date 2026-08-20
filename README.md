@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 [![Node](https://img.shields.io/badge/Node-%E2%89%A520-green?style=for-the-badge)](https://nodejs.org)
-[![Tests](https://img.shields.io/badge/tests-70%20passing-brightgreen?style=for-the-badge)](#testing)
+[![Tests](https://img.shields.io/badge/tests-80%20passing-brightgreen?style=for-the-badge)](#testing)
 
 The stock DSH rule is *one plugin = one MCP server*, and every one of that
 server's tools is registered directly — so its full JSON schema sits in your
@@ -211,11 +211,19 @@ node test/http.test.mjs    # HTTP/SSE transport vs a real node:http server
 node test/suite.test.mjs   # config, cache, search, guard, manager (fault injection)
 ```
 
-**70 tests passing.** The suites spawn real MCP servers (a faithful mock that can
-be told to crash, hang, flood, or exit) and assert the reliability invariants:
-requests always settle, a crash rejects instead of hanging, the circuit breaker
-opens, a stale connection reconnects, oversized output spills to a `0600` file,
-and a four-server fault storm produces **zero unhandled rejections**.
+**80 tests passing.** The suites spawn real MCP servers (a faithful mock that can
+be told to crash, hang, flood its stdout, ignore SIGTERM, stall a response body,
+or frame SSE with CRLF) and assert the reliability invariants: requests always
+settle, a crash rejects instead of hanging, the circuit breaker opens, a stale
+connection reconnects, oversized output spills to a `0600` file, and a
+four-server fault storm produces **zero unhandled rejections**.
+
+The suite includes explicit regression tests for every issue found in the
+security/reliability audit: an unbounded-stdout flood is now capped and the child
+**reaped** (no OOM, no orphan); a timeout during an HTTP body read maps to
+`MCP_TIMEOUT` (not a raw `AbortError`); CRLF-framed SSE parses correctly; `stop()`
+returns promptly on a fast exit yet still `SIGKILL`s a stubborn child; and a
+long-lived `AbortSignal` accumulates no leaked listeners across many requests.
 
 Verified end-to-end inside a real `dsh` instance with a Burp/Chrome/Falcon-shaped
 config: the `mcp` tool and promoted direct tools register, lazy connect works

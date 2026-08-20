@@ -7,10 +7,12 @@
  * hanging endpoint for timeout tests. It prints its bound port as the first
  * stdout line so the test harness can find it.
  *
- *   MOCK_MODE=json|sse       response encoding (default json)
+ *   MOCK_MODE=json|sse|sse-crlf  response encoding (default json)
  *   MOCK_REQUIRE_AUTH=token  reject requests without this bearer token
  *   MOCK_EXPIRE_AFTER=N       return 404 after N tool calls (session expiry)
- *   MOCK_HANG=1               never respond (timeout test)
+ *   MOCK_HANG=1               never respond at all (initial-fetch timeout test)
+ *   MOCK_STALL_BODY=1         send SSE headers + a notification, then stall the
+ *                             body forever without the reply (body-read timeout)
  */
 
 import http from 'node:http';
@@ -19,6 +21,7 @@ const MODE = process.env.MOCK_MODE ?? 'json';
 const REQUIRE_AUTH = process.env.MOCK_REQUIRE_AUTH;
 const EXPIRE_AFTER = Number(process.env.MOCK_EXPIRE_AFTER ?? 0);
 const HANG = process.env.MOCK_HANG === '1';
+const STALL_BODY = process.env.MOCK_STALL_BODY === '1';
 
 let sessionCounter = 0;
 let callsSinceInit = 0;
@@ -90,6 +93,16 @@ const server = http.createServer((req, res) => {
       }
     }
 
+    // After a successful handshake, stall the body of the next real request:
+    // headers + a notification are sent, then the reply never comes. This
+    // exercises a timeout firing DURING the body read, not the initial fetch.
+    if (STALL_BODY && (method === 'tools/list' || method === 'tools/call')) {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/message', params: {} })}\n\n`);
+      // deliberately never write the reply, never end
+      return;
+    }
+
     if (method === 'tools/list') {
       reply(res, id, { tools: TOOLS });
       return;
@@ -114,11 +127,13 @@ function reply(res, id, result, sessionId, error) {
   const headers = {};
   if (sessionId) headers['mcp-session-id'] = sessionId;
 
-  if (MODE === 'sse') {
+  if (MODE === 'sse' || MODE === 'sse-crlf') {
+    // Real HTTP servers commonly frame SSE with CRLF; exercise both.
+    const nl = MODE === 'sse-crlf' ? '\r\n' : '\n';
     res.writeHead(200, { ...headers, 'content-type': 'text/event-stream' });
     // Emit an unrelated notification first to exercise notification forwarding.
-    res.write(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/message', params: { level: 'info' } })}\n\n`);
-    res.write(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
+    res.write(`event: message${nl}data: ${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/message', params: { level: 'info' } })}${nl}${nl}`);
+    res.write(`event: message${nl}data: ${JSON.stringify(message)}${nl}${nl}`);
     res.end();
   } else {
     res.writeHead(200, { ...headers, 'content-type': 'application/json' });

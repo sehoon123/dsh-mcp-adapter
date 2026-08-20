@@ -90,6 +90,24 @@ console.log('\n── http: SSE encoding + notification forwarding ───');
   }
 }
 
+console.log('\n── http: SSE with CRLF framing (regression) ───────');
+{
+  const { url, stop } = await startServer({ MOCK_MODE: 'sse-crlf' });
+  let notifications = 0;
+  const t = new HttpTransport({ url, defaultTimeoutMs: 3_000, warn: () => {}, onNotification: () => { notifications += 1; } });
+  try {
+    await init(t);
+    const list = await t.request('tools/list');
+    check('lists tools over CRLF-framed SSE', list.tools.length === 2);
+    check('forwarded CRLF SSE notification', notifications > 0, `${notifications}`);
+  } catch (error) {
+    check('lists tools over CRLF-framed SSE', false, String(error.message).slice(0, 60));
+  } finally {
+    await t.stop();
+    stop();
+  }
+}
+
 console.log('\n── http: auth enforcement ─────────────────────────');
 {
   const { url, stop } = await startServer({ MOCK_MODE: 'json', MOCK_REQUIRE_AUTH: 'secret123' });
@@ -150,6 +168,29 @@ console.log('\n── http: timeout on a hanging server ────────
       check('hanging request times out', error.code === 'MCP_TIMEOUT', error.code);
       check('http timeout near deadline', elapsed >= 700 && elapsed < 2_500, `${elapsed}ms`);
     }
+  } finally {
+    await t.stop();
+    stop();
+  }
+}
+
+console.log('\n── http: timeout DURING body read maps to MCP_TIMEOUT (regression) ─');
+{
+  const { url, stop } = await startServer({ MOCK_STALL_BODY: '1' });
+  const t = new HttpTransport({ url, defaultTimeoutMs: 5_000, warn: () => {} });
+  try {
+    await init(t); // handshake succeeds (initialize is not stalled)
+    const start = Date.now();
+    try {
+      await t.request('tools/list', undefined, { timeoutMs: 800 });
+      check('stalled body rejects', false, 'resolved');
+    } catch (error) {
+      const elapsed = Date.now() - start;
+      check('stalled body maps to MCP_TIMEOUT (not raw AbortError)', error.code === 'MCP_TIMEOUT', error.code ?? error.name);
+      check('body timeout fires near deadline', elapsed >= 700 && elapsed < 2_500, `${elapsed}ms`);
+    }
+  } catch (error) {
+    check('stalled body maps to MCP_TIMEOUT', false, `init failed: ${String(error.message).slice(0, 50)}`);
   } finally {
     await t.stop();
     stop();

@@ -273,6 +273,102 @@ section('manager: no unhandled rejections under fault storm');
   }
 }
 
+section('regression: stdout flood is bounded + child reaped');
+{
+  // A server that streams stdout forever without a newline must not OOM the
+  // host, and its process must be reaped (not orphaned) when the transport dies.
+  const { StdioTransport } = await import('../lib/transport/stdio.js');
+  let closed = false;
+  let closeReason;
+  const transport = new StdioTransport({
+    command: process.execPath,
+    args: [STDIO_SERVER],
+    env: { MOCK_FLOOD_STDOUT: 'search_web', MOCK_TOOL_COUNT: '5' },
+    defaultTimeoutMs: 3_000,
+    warn: () => {},
+    onClose: (reason) => { closed = true; closeReason = reason; },
+  });
+  await transport.start();
+  await transport.rpc.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } });
+  const pid = transport._child?.pid;
+  // Trigger the flood; the call itself will reject when the transport dies.
+  await transport.rpc.request('tools/call', { name: 'search_web', arguments: {} }, { timeoutMs: 3_000 }).catch(() => {});
+  // Give the overflow guard time to trip and reap.
+  await new Promise((r) => setTimeout(r, 1_500));
+  check('transport died on flood', closed === true, String(closeReason?.message).slice(0, 40));
+  check('overflow reason reported', /maximum line size/.test(String(closeReason?.message ?? '')));
+  // The child must be gone (reaped). kill(pid,0) throws ESRCH when it no longer exists.
+  let alive = false;
+  try { process.kill(pid, 0); alive = true; } catch { alive = false; }
+  check('child process was reaped (not orphaned)', alive === false, `pid ${pid} still alive`);
+  await transport.stop();
+}
+
+section('regression: stop() returns promptly on fast exit');
+{
+  const { StdioTransport } = await import('../lib/transport/stdio.js');
+  const transport = new StdioTransport({
+    command: process.execPath,
+    args: [STDIO_SERVER],
+    env: { MOCK_TOOL_COUNT: '3' },
+    defaultTimeoutMs: 3_000,
+    warn: () => {},
+  });
+  await transport.start();
+  await transport.rpc.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } });
+  const start = Date.now();
+  await transport.stop();
+  const elapsed = Date.now() - start;
+  // A cooperative server exits on SIGTERM immediately; stop() must not wait the
+  // full 2s SIGKILL fallback.
+  check('stop() returns well under the 2s fallback', elapsed < 1_500, `${elapsed}ms`);
+}
+
+section('regression: stop() escalates to SIGKILL for a stubborn child');
+{
+  const { StdioTransport } = await import('../lib/transport/stdio.js');
+  const transport = new StdioTransport({
+    command: process.execPath,
+    args: [STDIO_SERVER],
+    env: { MOCK_TOOL_COUNT: '3', MOCK_IGNORE_SIGTERM: '1' },
+    defaultTimeoutMs: 3_000,
+    warn: () => {},
+  });
+  await transport.start();
+  await transport.rpc.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } });
+  const pid = transport._child?.pid;
+  await transport.stop(); // must escalate SIGTERM → SIGKILL and still complete
+  // SIGKILL is asynchronous; poll briefly for the OS to reap the process.
+  let alive = true;
+  for (let i = 0; i < 20 && alive; i += 1) {
+    try { process.kill(pid, 0); } catch { alive = false; break; }
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  check('SIGTERM-ignoring child is SIGKILLed by stop()', alive === false, `pid ${pid} alive`);
+}
+
+section('regression: abort listener does not leak on a shared signal');
+{
+  const { JsonRpcClient } = await import('../lib/transport/jsonrpc.js');
+  const controller = new AbortController();
+  // A stub transport that immediately replies to every request.
+  let client;
+  client = new JsonRpcClient({
+    send: (msg) => { if (msg.id !== undefined) queueMicrotask(() => client.receive({ jsonrpc: '2.0', id: msg.id, result: { ok: true } })); },
+    defaultTimeoutMs: 1_000,
+  });
+  // Fire many requests on the SAME long-lived signal; each must clean up its
+  // listener on normal settle, leaving the count near zero.
+  for (let i = 0; i < 50; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    await client.request('ping', undefined, { signal: controller.signal });
+  }
+  const { getEventListeners } = await import('node:events');
+  const count = getEventListeners(controller.signal, 'abort').length;
+  check('no abort-listener buildup after 50 settled requests', count === 0, `${count} listeners`);
+}
+
 console.log(`\n${'═'.repeat(56)}`);
 console.log(`  passed: ${passed}   failed: ${failed}`);
 if (failures.length) failures.forEach((f) => console.log(`   • ${f}`));

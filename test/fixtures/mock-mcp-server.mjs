@@ -14,6 +14,8 @@
  *   MOCK_HUGE_OUTPUT     tool name that returns a multi-MB text block
  *   MOCK_BAD_FRAME       emit one malformed line before the real reply
  *   MOCK_EXIT_AFTER_MS   exit(0) unprompted after N ms (tests reconnect)
+ *   MOCK_FLOOD_STDOUT    tool name that streams unframed stdout forever (no newline)
+ *   MOCK_IGNORE_SIGTERM  ignore SIGTERM so stop() must escalate to SIGKILL
  */
 
 import process from 'node:process';
@@ -25,6 +27,8 @@ const SLOW_INIT_MS = Number(process.env.MOCK_SLOW_INIT_MS ?? 0);
 const HUGE_OUTPUT = process.env.MOCK_HUGE_OUTPUT;
 const BAD_FRAME = process.env.MOCK_BAD_FRAME;
 const EXIT_AFTER_MS = Number(process.env.MOCK_EXIT_AFTER_MS ?? 0);
+const FLOOD_STDOUT = process.env.MOCK_FLOOD_STDOUT;
+const IGNORE_SIGTERM = process.env.MOCK_IGNORE_SIGTERM === '1';
 
 if (EXIT_AFTER_MS > 0) setTimeout(() => process.exit(0), EXIT_AFTER_MS).unref();
 
@@ -111,6 +115,17 @@ function handleLine(line) {
     if (CRASH_ON_CALL && toolName === CRASH_ON_CALL) {
       process.exit(1); // simulate a server that dies mid-request
     }
+    if (FLOOD_STDOUT && toolName === FLOOD_STDOUT) {
+      // Stream chunks with NO newline, forever, to exercise the transport's
+      // unframed-overflow guard and child reaping.
+      const blob = 'X'.repeat(256 * 1024);
+      const pump = () => {
+        if (!process.stdout.write(blob)) process.stdout.once('drain', pump);
+        else setImmediate(pump);
+      };
+      pump();
+      return;
+    }
     if (HANG_ON_CALL && toolName === HANG_ON_CALL) {
       return; // never reply: the client's timeout must fire
     }
@@ -138,5 +153,9 @@ function handleLine(line) {
   }
 }
 
-process.on('SIGTERM', () => process.exit(0));
+if (IGNORE_SIGTERM) {
+  process.on('SIGTERM', () => {}); // force stop() to escalate to SIGKILL
+} else {
+  process.on('SIGTERM', () => process.exit(0));
+}
 process.on('SIGINT', () => process.exit(0));
