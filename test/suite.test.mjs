@@ -16,6 +16,7 @@ import { searchTools, scoreTool } from '../lib/core/search.js';
 import { guardOutput, flattenContent } from '../lib/core/output-guard.js';
 import { isDirectTool, globMatch } from '../lib/tools/proxy.js';
 import { ServerManager } from '../lib/core/server-manager.js';
+import { mcpSchemaToParameters } from '../lib/tools/schema.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const STDIO_SERVER = join(here, 'fixtures', 'mock-mcp-server.mjs');
@@ -134,7 +135,7 @@ check('small text passes through', guardOutput([{ type: 'text', text: 'hello' }]
   check('preview within budget', Buffer.byteLength(guarded.text, 'utf8') < 8 * 1024, `${Buffer.byteLength(guarded.text)}b`);
   check('spilled to a file', typeof guarded.fullPath === 'string' && readFileSync(guarded.fullPath, 'utf8').length === 200 * 1024);
 }
-check('counts image blocks', flattenContent([{ type: 'text', text: 'x' }, { type: 'image', data: '...' }]).images === 1);
+check('malformed image block is skipped, not counted as usable', flattenContent([{ type: 'text', text: 'x' }, { type: 'image', data: '...' }]).images.length === 0);
 check('tolerates non-array content', flattenContent('raw string').text === 'raw string');
 
 section('proxy: directTools matching');
@@ -367,6 +368,67 @@ section('regression: abort listener does not leak on a shared signal');
   const { getEventListeners } = await import('node:events');
   const count = getEventListeners(controller.signal, 'abort').length;
   check('no abort-listener buildup after 50 settled requests', count === 0, `${count} listeners`);
+}
+
+section('regression: MCP images are preserved, not dropped');
+{
+  // A browser screenshot tool answers ENTIRELY with an image; counting and
+  // discarding it (the old behaviour) made such tools useless.
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+  const flat = flattenContent([{ type: 'text', text: 'shot' }, { type: 'image', data: png, mimeType: 'image/png' }]);
+  check('image block is decoded to bytes', flat.images.length === 1 && Buffer.isBuffer(flat.images[0].bytes));
+  check('decoded bytes are a real PNG', flat.images[0].bytes.subarray(1, 4).toString() === 'PNG');
+  check('media type retained', flat.images[0].mediaType === 'image/png');
+
+  const guarded = guardOutput([{ type: 'text', text: 'x'.repeat(200_000) }, { type: 'image', data: png, mimeType: 'image/png' }], { maxBytes: 2_048, warn: () => {} });
+  check('images survive text truncation', guarded.truncated === true && guarded.images.length === 1);
+
+  check('unsupported media type is skipped, not thrown', flattenContent([{ type: 'image', data: png, mimeType: 'image/tiff' }]).skippedImages === 1);
+  check('corrupt base64 is skipped safely', flattenContent([{ type: 'image', data: '!!!not base64!!!', mimeType: 'image/png' }]).images.length === 0);
+  check('embedded resource image is picked up', flattenContent([{ type: 'resource', resource: { blob: png, mimeType: 'image/png' } }]).images.length === 1);
+  check('image count is capped', flattenContent(Array.from({ length: 20 }, () => ({ type: 'image', data: png, mimeType: 'image/png' }))).images.length <= 8);
+}
+
+section('regression: directTools expose the real parameter schema');
+{
+  const converted = mcpSchemaToParameters({
+    type: 'object',
+    properties: {
+      format: { type: 'string', enum: ['png', 'jpeg'], description: 'Image encoding.' },
+      fullPage: { type: 'boolean' },
+    },
+    required: ['format'],
+  });
+  check('conversion is not passthrough', converted.passthrough === false);
+  check('real parameter names surface', Object.keys(converted.parameters).join(',') === 'format,fullPage');
+  check('enum preserved', JSON.stringify(converted.parameters.format.enum) === '["png","jpeg"]');
+  check('requiredness preserved', converted.parameters.format.required === true);
+  check('optional stays optional', converted.parameters.fullPage.required === undefined);
+
+  check('nested object converts with mandatory openness', mcpSchemaToParameters({ type: 'object', properties: { o: { type: 'object', properties: { a: { type: 'integer' } } } } }).parameters.o.additionalProperties === true);
+  check('anyOf degrades to json (never mis-described)', mcpSchemaToParameters({ type: 'object', properties: { x: { anyOf: [{ type: 'string' }] } } }).parameters.x.type === 'json');
+  check('union type degrades to json', mcpSchemaToParameters({ type: 'object', properties: { x: { type: ['string', 'null'] } } }).parameters.x.type === 'json');
+  check('type-mismatched enum is dropped', mcpSchemaToParameters({ type: 'object', properties: { x: { type: 'string', enum: [1] } } }).parameters.x.enum === undefined);
+  check('arg-free tool yields empty parameters', Object.keys(mcpSchemaToParameters({ type: 'object', properties: {} }).parameters).length === 0);
+  check('missing schema falls back to passthrough args', mcpSchemaToParameters(undefined).passthrough === true);
+  check('non-object root falls back', mcpSchemaToParameters({ type: 'array' }).passthrough === true);
+  const deep = { type: 'object', properties: { a: { type: 'object', properties: { b: { type: 'object', properties: { c: { type: 'object', properties: { d: { type: 'object', properties: { e: { type: 'string' } } } } } } } } } } };
+  check('deep nesting terminates without throwing', typeof mcpSchemaToParameters(deep).parameters.a === 'object');
+}
+
+section('regression: cache retains bounded input schemas');
+{
+  const dir = mkdtempSync(join(tmpdir(), 'mcp-schema-cache-'));
+  const cache = new MetadataCache({ path: join(dir, 'c.json'), warn: () => {} });
+  cache.update('s', [
+    { name: 'small', description: 'd', inputSchema: { type: 'object', properties: { a: { type: 'string' } } } },
+    { name: 'huge', description: 'd', inputSchema: { type: 'object', properties: { a: { type: 'string', description: 'x'.repeat(20_000) } } } },
+  ]);
+  const reloaded = new MetadataCache({ path: join(dir, 'c.json'), warn: () => {} });
+  const tools = reloaded.getTools('s');
+  check('small schema is cached', tools.find((t) => t.name === 'small')?.inputSchema !== undefined);
+  check('oversized schema omitted (falls back to passthrough)', tools.find((t) => t.name === 'huge')?.inputSchema === undefined);
+  rmSync(dir, { recursive: true, force: true });
 }
 
 console.log(`\n${'═'.repeat(56)}`);

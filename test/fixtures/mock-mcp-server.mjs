@@ -16,6 +16,8 @@
  *   MOCK_EXIT_AFTER_MS   exit(0) unprompted after N ms (tests reconnect)
  *   MOCK_FLOOD_STDOUT    tool name that streams unframed stdout forever (no newline)
  *   MOCK_IGNORE_SIGTERM  ignore SIGTERM so stop() must escalate to SIGKILL
+ *   MOCK_IMAGE_TOOL      tool name that returns a real PNG image block
+ *   MOCK_RICH_SCHEMA     advertise realistic per-tool inputSchemas (for directTools)
  */
 
 import process from 'node:process';
@@ -28,6 +30,32 @@ const HUGE_OUTPUT = process.env.MOCK_HUGE_OUTPUT;
 const BAD_FRAME = process.env.MOCK_BAD_FRAME;
 const EXIT_AFTER_MS = Number(process.env.MOCK_EXIT_AFTER_MS ?? 0);
 const FLOOD_STDOUT = process.env.MOCK_FLOOD_STDOUT;
+const IMAGE_TOOL = process.env.MOCK_IMAGE_TOOL;
+const RICH_SCHEMA = process.env.MOCK_RICH_SCHEMA === '1';
+
+/** A real 1x1 red PNG, base64 — small but a valid decodable image. */
+const TINY_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+
+/** Realistic per-tool input schemas, so directTools schema fidelity can be tested. */
+const RICH_SCHEMAS = {
+  take_screenshot: {
+    type: 'object',
+    properties: {
+      format: { type: 'string', enum: ['png', 'jpeg'], description: 'Image encoding.' },
+      fullPage: { type: 'boolean', description: 'Capture the entire scrollable page.' },
+      selector: { type: 'string', description: 'CSS selector to clip the capture to.' },
+    },
+    required: [],
+  },
+  quarantine_host: {
+    type: 'object',
+    properties: {
+      hostId: { type: 'string', description: 'The agent/host identifier to isolate.' },
+      reason: { type: 'string', description: 'Why the host is being isolated.' },
+    },
+    required: ['hostId'],
+  },
+};
 const IGNORE_SIGTERM = process.env.MOCK_IGNORE_SIGTERM === '1';
 
 if (EXIT_AFTER_MS > 0) setTimeout(() => process.exit(0), EXIT_AFTER_MS).unref();
@@ -45,10 +73,12 @@ function buildTools() {
   for (let i = 0; i < TOOL_COUNT; i += 1) {
     const [name, description] = names[i % names.length];
     const suffix = i < names.length ? '' : `_${i}`;
+    const toolName = `${name}${suffix}`;
+    const rich = RICH_SCHEMA ? RICH_SCHEMAS[toolName] : undefined;
     tools.push({
-      name: `${name}${suffix}`,
+      name: toolName,
       description,
-      inputSchema: {
+      inputSchema: rich ?? {
         type: 'object',
         properties: { query: { type: 'string', description: 'The input value.' } },
         required: i % 2 === 0 ? ['query'] : [],
@@ -128,6 +158,19 @@ function handleLine(line) {
     }
     if (HANG_ON_CALL && toolName === HANG_ON_CALL) {
       return; // never reply: the client's timeout must fire
+    }
+    if (IMAGE_TOOL && toolName === IMAGE_TOOL) {
+      send({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [
+            { type: 'text', text: 'Screenshot captured.' },
+            { type: 'image', data: TINY_PNG, mimeType: 'image/png' },
+          ],
+        },
+      });
+      return;
     }
     if (HUGE_OUTPUT && toolName === HUGE_OUTPUT) {
       const big = 'X'.repeat(3 * 1024 * 1024);

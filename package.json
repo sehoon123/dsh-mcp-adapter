@@ -1,11 +1,24 @@
 {
   "name": "@deepseek-ai/dsh-mcp-adapter",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Context-cheap, crash-resistant MCP access for the DeepSeek Harness: one lazy proxy tool instead of dumping every server's schema into context. Zero dependencies.",
-  "keywords": ["deepseek-harness", "dsh", "cordis-plugin", "mcp", "model-context-protocol", "proxy", "context-window", "tool-search", "zero-dependency"],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "cordis-plugin",
+    "mcp",
+    "model-context-protocol",
+    "proxy",
+    "context-window",
+    "tool-search",
+    "zero-dependency"
+  ],
   "license": "MIT",
   "author": "sehoon123",
-  "repository": { "type": "git", "url": "git+https://github.com/sehoon123/dsh-mcp-adapter.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sehoon123/dsh-mcp-adapter.git"
+  },
   "homepage": "https://github.com/sehoon123/dsh-mcp-adapter#readme",
   "type": "module",
   "main": "lib/index.js",
@@ -13,8 +26,14 @@
     ".": "./lib/index.js",
     "./package.json": "./package.json"
   },
-  "files": ["lib/", "README.md", "LICENSE"],
-  "engines": { "node": ">=20" },
+  "files": [
+    "lib/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "test": "node test/stdio.test.mjs && node test/http.test.mjs && node test/suite.test.mjs"
   },
@@ -23,9 +42,17 @@
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.1"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/cordis": { "optional": true },
-    "@deepseek-ai/dsh-tools": { "optional": true }
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
   },
   "dependencies": {},
-  "dsh": { "plugin": { "kind": "mcp-adapter" } }
+  "dsh": {
+    "plugin": {
+      "kind": "mcp-adapter"
+    }
+  }
 }
